@@ -3,7 +3,7 @@
 **An ODEX / VDEX patcher for Android. Change the compiled code ART runs, without touching the signed APK.**
 
 ARTisan automates the OAT-patching technique explained in the write-up
-[*Falling in Love with the Art of ART*](https://spookhorror.gitbook.io/). Instead of
+[*Falling in Love with the Art of ART*]([https://spookhorror.gitbook.io/](https://spookhorror.gitbook.io/blogs/falling-in-love-with-the-art-of-art)). Instead of
 hand-editing bytes in a hex editor, you pick an APK and the app does the whole flow for you.
 
 ---
