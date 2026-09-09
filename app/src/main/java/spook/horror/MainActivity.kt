@@ -167,7 +167,7 @@ private fun LabScaffold() {
 @Composable
 private fun AboutDialog(onDismiss: () -> Unit) {
     // ─── Fill in your details here ───────────────────────────────
-    val authorName = "Varun Kumar/ spookhorror"
+    val authorName = "Varun"
     val authorHandle = "@spookhorror"
     val blogUrl = "spookhorror.gitbook.io/"
     // ─────────────────────────────────────────────────────────────
