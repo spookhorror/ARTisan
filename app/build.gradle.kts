@@ -4,7 +4,7 @@ plugins {
 }
 
 android {
-    namespace = "spook.horror"
+    namespace = "spook.horror.artisan"
     compileSdk {
         version = release(37)
     }
