@@ -10,7 +10,7 @@ android {
     }
 
     defaultConfig {
-        applicationId = "spook.horror"
+        applicationId = "spook.horror.artisan"
         minSdk = 28
         targetSdk = 37
         versionCode = 1

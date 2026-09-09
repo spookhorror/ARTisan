@@ -1,4 +1,4 @@
-package spook.horror.security
+package spook.horror.artisan
 
 import android.content.Context
 import android.net.Uri
