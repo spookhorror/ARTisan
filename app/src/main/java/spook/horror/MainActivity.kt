@@ -99,6 +99,7 @@ private fun LabScaffold() {
 
     var menuOpen by remember { mutableStateOf(false) }
     var showAbout by remember { mutableStateOf(false) }
+    var verbose by remember { mutableStateOf(Dex2OatRunner.verbose) }
 
     if (showAbout) {
         AboutDialog(onDismiss = { showAbout = false })
@@ -131,6 +132,14 @@ private fun LabScaffold() {
                         expanded = menuOpen,
                         onDismissRequest = { menuOpen = false },
                     ) {
+                        DropdownMenuItem(
+                            text = { Text("Verbose logging") },
+                            trailingIcon = { Text(if (verbose) "On ✓" else "Off") },
+                            onClick = {
+                                verbose = !verbose
+                                Dex2OatRunner.verbose = verbose
+                            },
+                        )
                         DropdownMenuItem(
                             text = { Text("About") },
                             onClick = {
@@ -282,7 +291,7 @@ private fun ResultSection(r: Dex2OatRunner.RunResult) {
         StepCard(
             stepNumber = 1,
             title = "Source + installed CRC32s captured",
-            subtitle = "Every classesN.dex in the INSTALLED target has its own OatDexFileHeader entry — we patch each one, matching LP's flow",
+            subtitle = "Every classesN.dex in the INSTALLED target has its own OatDexFileHeader entry — we patch each one",
             statusOk = r.originalDexCrc32 >= 0 && r.installedDexCrcs.isNotEmpty(),
         ) {
             LabeledLine("source (picked)", r.sourceApkPath)
@@ -312,7 +321,7 @@ private fun ResultSection(r: Dex2OatRunner.RunResult) {
         StepCard(
             stepNumber = 3,
             title = "dex2oat invocation",
-            subtitle = "Same command shape LuckyPatcher uses (only ISA differs by device)",
+            subtitle = "Same command shape installd uses (only ISA differs by device)",
             statusOk = r.exitCode == 0 && r.outOatExists,
         ) {
             LabeledLine("instruction set", r.instructionSet)
@@ -400,7 +409,7 @@ private fun ResultSection(r: Dex2OatRunner.RunResult) {
         StepCard(
             stepNumber = 8,
             title = "Move to install-dir oat/<isa>/",
-            subtitle = "Copies odex+vdex into the target APK's real install dir (LP's final step). " +
+            subtitle = "Copies odex+vdex into the target APK's real install dir (the final step). " +
                 "Skipped when the target isn't installed, or when any earlier step failed.",
             statusOk = if (r.moveAttempted) r.moveApplied else true,
         ) {
@@ -492,7 +501,7 @@ private fun RunningCard() {
 private fun MechanismCard() {
     SectionCard(title = "How it works") {
         Text(
-            "Eight steps, executed as root, mirroring LuckyPatcher's OAT-replacement flow:",
+            "Eight steps, executed as root, reproducing installd's OAT-replacement flow:",
             style = MaterialTheme.typography.bodyMedium,
         )
         Spacer(Modifier.height(8.dp))
