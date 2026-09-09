@@ -1,4 +1,4 @@
-package spook.horror
+package spook.horror.artisan
 
 import android.net.Uri
 import android.os.Bundle
@@ -56,7 +56,6 @@ import androidx.compose.ui.unit.sp
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
-import spook.horror.artisan.Dex2OatRunner
 import spook.horror.ui.theme.Dex2oatTheme
 
 class MainActivity : ComponentActivity() {
