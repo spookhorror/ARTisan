@@ -55,7 +55,8 @@ The overflow menu (⋮) has a **Verbose logging** toggle for full step-by-step o
 
 The full mechanism, the ART trust chain, the AOSP source that enforces it, and a manual
 byte-level walkthrough are documented here:
-**[Falling in Love with the Art of ART](https://spookhorror.gitbook.io/)**.
+**
+[[Falling in Love with the Art of ART]](https://spookhorror.gitbook.io/blogs/falling-in-love-with-the-art-of-art)**.
 
 ---
 
