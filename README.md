@@ -37,7 +37,7 @@ fixed offset, so it survives OAT/VDEX format changes across ART versions.
 
 - A **rooted** device (needs `dex2oat` and write access to the app's install dir).
 - The target app must already be **installed** (ARTisan patches an installed package).
-- Tested on Android 11 to 16 (arm64). Format is version-agnostic by design.
+- Android 11 to 16 (arm64). Format is version-agnostic by design.
 
 ## Usage
 
