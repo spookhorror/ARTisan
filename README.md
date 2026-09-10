@@ -79,6 +79,14 @@ The defensive takeaway is the important one: **on a rooted device, client-side s
 and integrity checks are not a real security boundary. Keep checks that matter
 server-side.**
 
+## License
+
+Released under the [MIT License](LICENSE). Use it, modify it, learn from it. If it
+helps, a credit is appreciated but not required.
+
+Credit where due: this builds on Paul Sabanal's *Hiding Behind ART* (BlackHat Asia 2015),
+IBM's research on the OAT/VDEX formats, and the ideas behind LuckyPatcher's OAT handling.
+
 ---
 
 *by [@spookhorror](https://github.com/spookhorror)*
