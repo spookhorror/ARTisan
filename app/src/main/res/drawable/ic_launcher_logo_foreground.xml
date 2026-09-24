@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Logo.png inset into the adaptive-icon safe zone so the launcher mask
+     (circle / squircle / rounded-square) never crops it. Increase android:inset
+     if the logo still looks too large; decrease it to make the logo bigger. -->
+<inset xmlns:android="http://schemas.android.com/apk/res/android"
+    android:drawable="@drawable/ic_launcher_logo"
+    android:inset="20%" />

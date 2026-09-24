@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Solid background behind the logo. Change the color to match your logo
+     (e.g. #FFFFFF for white, #0A0D11 for near-black). -->
+<shape xmlns:android="http://schemas.android.com/apk/res/android"
+    android:shape="rectangle">
+    <solid android:color="#FFFFFF" />
+</shape>
