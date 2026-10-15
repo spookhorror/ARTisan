@@ -77,7 +77,7 @@ private fun LabScaffold() {
     val scope = rememberCoroutineScope()
 
     var running by remember { mutableStateOf(false) }
-    var result by remember { mutableStateOf<Dex2OatRunner.RunResult?>(null) }
+    var result by remember { mutableStateOf<RunResult?>(null) }
 
     val pickApkLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.OpenDocument(),
@@ -168,6 +168,10 @@ private fun LabScaffold() {
             running = running,
             result = result,
             onPick = onPick,
+            onLaunch = {
+                val pkg = result?.targetPackage ?: return@LabScreen
+                scope.launch { withContext(Dispatchers.IO) { Dex2OatRunner.relaunchTarget(pkg) } }
+            },
         )
     }
 }
@@ -212,8 +216,9 @@ private fun AboutDialog(onDismiss: () -> Unit) {
 private fun LabScreen(
     modifier: Modifier = Modifier,
     running: Boolean,
-    result: Dex2OatRunner.RunResult?,
+    result: RunResult?,
     onPick: () -> Unit,
+    onLaunch: () -> Unit,
 ) {
     Column(
         modifier = modifier
@@ -230,11 +235,7 @@ private fun LabScreen(
         }
 
         if (result != null) {
-            ResultSection(result)
-        } else if (!running) {
-            // Idle: keep the explainer available but secondary, below the action.
-            MechanismCard()
-            CompatibilityCard()
+            ResultSection(result, onLaunch)
         }
     }
 }
@@ -292,9 +293,15 @@ private fun HeroActionCard(running: Boolean, hasResult: Boolean, onPick: () -> U
 }
 
 @Composable
-private fun ResultSection(r: Dex2OatRunner.RunResult) {
+private fun ResultSection(r: RunResult, onLaunch: () -> Unit) {
+    var showDetails by remember { mutableStateOf(false) }
     Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
-        OverallStatusCard(r)
+        OverallStatusCard(r, onLaunch)
+
+        TextButton(onClick = { showDetails = !showDetails }) {
+            Text(if (showDetails) "Hide details" else "Show details")
+        }
+        if (showDetails) {
 
         StepCard(
             stepNumber = 1,
@@ -442,11 +449,12 @@ private fun ResultSection(r: Dex2OatRunner.RunResult) {
                 )
             }
         }
+        } // showDetails
     }
 }
 
 @Composable
-private fun OverallStatusCard(r: Dex2OatRunner.RunResult) {
+private fun OverallStatusCard(r: RunResult, onLaunch: () -> Unit) {
     val allOk = r.outOatExists && r.exitCode == 0 && r.pathsLengthMatch && r.patchApplied && r.vdexPatchApplied && r.permissionsApplied
     val bg = if (allOk) MaterialTheme.colorScheme.primaryContainer else MaterialTheme.colorScheme.errorContainer
     val fg = if (allOk) MaterialTheme.colorScheme.onPrimaryContainer else MaterialTheme.colorScheme.onErrorContainer
@@ -471,6 +479,12 @@ private fun OverallStatusCard(r: Dex2OatRunner.RunResult) {
                 style = MaterialTheme.typography.bodySmall,
                 color = fg,
             )
+            if (r.moveApplied && r.targetPackage.isNotBlank()) {
+                Spacer(Modifier.height(12.dp))
+                Button(onClick = onLaunch, modifier = Modifier.fillMaxWidth()) {
+                    Text("Launch ${r.targetPackage}")
+                }
+            }
         }
     }
 }
@@ -502,52 +516,6 @@ private fun RunningCard() {
                 )
             }
         }
-    }
-}
-
-@Composable
-private fun MechanismCard() {
-    SectionCard(title = "How it works") {
-        Text(
-            "Eight steps, executed as root, reproducing installd's OAT-replacement flow:",
-            style = MaterialTheme.typography.bodyMedium,
-        )
-        Spacer(Modifier.height(8.dp))
-        BulletLine("1", "Read picked APK → get package name → look up installed app's sourceDir via PackageManager, read every classesN.dex CRC32 from the installed APK")
-        BulletLine("2", "Copy APK to /data/tmp/<pad>/base.apk where <pad> = '1' × N so total path length equals installed sourceDir length")
-        BulletLine("3", "Run dex2oat --dex-file=<padded> --oat-file=<filesDir>/oat/<isa>/base.odex --class-loader-context=PCL[] --instruction-set=<isa>")
-        BulletLine("4", "Multi-dex ODEX patch: for EACH classesN.dex, swap dex_file_location_data → installed sourceDir and dex_file_location_checksum → installed classesN.dex CRC32")
-        BulletLine("5", "VDEX patch: locate the dex_checksums array by searching for the picked CRC32s (version-agnostic — no hardcoded offset) and overwrite with the installed CRC32s — ART validates the VDEX against the installed APK too, independently of the ODEX")
-        BulletLine("6", "chmod 644 + chown 1000:<targetUid> on odex & vdex — matches installd output (group = target app's uid)")
-        BulletLine("7", "Copy odex+vdex to <installed-sourceDir>/oat/<isa>/, chmod/chown, and restorecon -R for SELinux labels")
-        BulletLine("8", "(Not shown) target app's next launch — ART loads the patched OAT")
-        Spacer(Modifier.height(8.dp))
-        Text(
-            "The picked APK must correspond to a currently-INSTALLED app. Effect is visible after the target app is restarted (its currently-running process still holds the old OAT).",
-            style = MaterialTheme.typography.bodySmall,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
-        )
-    }
-}
-
-@Composable
-private fun CompatibilityCard() {
-    SectionCard(title = "Android version compatibility") {
-        CompatRow("Android 11 (API 30)", "works cleanly — dex2oat via ART APEX")
-        CompatRow("Android 12 / 12L (31–32)", "works cleanly")
-        CompatRow("Android 13 (33)", "works cleanly")
-        CompatRow("Android 14 (34)", "works with root; sepolicy on some vendor builds may block dex2oat — Magisk sepatch usually lifts this")
-        CompatRow("Android 15 (35)", "same story as 14")
-        CompatRow("Android 16 (36)", "same story as 14")
-        Spacer(Modifier.height(6.dp))
-        Text(
-            "OAT header format changes across versions but our byte-patch is version-agnostic — " +
-                "it finds each entry by the ASCII path bytes and validates it via the uint32 size " +
-                "prefix, and the VDEX patch searches for the CRC array instead of hardcoding an offset, " +
-                "so any OAT/VDEX version works.",
-            style = MaterialTheme.typography.bodySmall,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
-        )
     }
 }
 
@@ -593,46 +561,6 @@ private fun StepBadge(n: Int, ok: Boolean) {
         contentAlignment = Alignment.Center,
     ) {
         Text(n.toString(), color = fg, fontWeight = FontWeight.Bold)
-    }
-}
-
-@Composable
-private fun SectionCard(title: String, content: @Composable () -> Unit) {
-    Card(
-        modifier = Modifier.fillMaxWidth(),
-        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceContainer),
-    ) {
-        Column(Modifier.padding(16.dp)) {
-            Text(title, style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.SemiBold)
-            Spacer(Modifier.height(8.dp))
-            content()
-        }
-    }
-}
-
-@Composable
-private fun BulletLine(marker: String, text: String) {
-    Row(Modifier.padding(vertical = 2.dp)) {
-        Text(
-            marker,
-            modifier = Modifier.width(20.dp),
-            fontWeight = FontWeight.Bold,
-            color = MaterialTheme.colorScheme.primary,
-        )
-        Text(text, style = MaterialTheme.typography.bodySmall)
-    }
-}
-
-@Composable
-private fun CompatRow(version: String, note: String) {
-    Row(Modifier.padding(vertical = 2.dp)) {
-        Text(
-            version,
-            modifier = Modifier.width(150.dp),
-            style = MaterialTheme.typography.labelMedium,
-            fontWeight = FontWeight.Medium,
-        )
-        Text(note, style = MaterialTheme.typography.bodySmall, modifier = Modifier.weight(1f))
     }
 }
 

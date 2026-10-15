@@ -6,12 +6,6 @@ import android.util.Log
 import java.io.BufferedReader
 import java.io.File
 import java.io.InputStreamReader
-import java.io.RandomAccessFile
-import java.util.zip.CRC32
-import java.util.zip.Deflater
-import java.util.zip.ZipEntry
-import java.util.zip.ZipFile
-import java.util.zip.ZipOutputStream
 
 /**
  * Dex2OatRunner — end-to-end lab pipeline that reproduces installd's OAT output
@@ -50,8 +44,6 @@ import java.util.zip.ZipOutputStream
  */
 object Dex2OatRunner {
 
-    private const val TAG = "dex2oat-lab"
-
     /**
      * Verbose step-by-step logging toggle (controlled from the UI menu).
      * When false, the pipeline's INFO narration is suppressed; errors (Log.e) always print.
@@ -74,58 +66,12 @@ object Dex2OatRunner {
     @JvmField
     var embedDexInVdex: Boolean = true
 
-    /** Gated INFO logger — same signature as vlog(TAG, msg) so calls swap 1:1. */
-    private fun vlog(tag: String, msg: String) {
-        if (verbose)
-            Log.i(tag, msg)
-    }
-
     // Scratch dir, apk name, and out oat name — matching installd's naming.
     private const val WORK_ROOT = "/data/tmp"
     private const val WORK_APK_NAME = "base.apk"
     private const val OAT_FILE_NAME = "base.odex"
     private const val VDEX_FILE_NAME = "base.vdex"
 
-    // Fallback CLC when neither the installed OAT nor PackageManager give us one.
-    private const val FALLBACK_CLC = "PCL[]"
-
-    data class RunResult(
-        val sourceApkPath: String,
-        val rootAvailable: Boolean,
-        val command: List<String>,
-        val exitCode: Int,
-        val stdout: String,
-        val stderr: String,
-        val outDexPath: String,          // /data/tmp/<pad>/base.apk
-        val outOatPath: String,          // <filesDir>/oat/<isa>/base.odex
-        val outOatExists: Boolean,
-        val outOatSizeBytes: Long,
-        val instructionSet: String,
-        val classLoaderContext: String?,
-        val classLoaderContextSource: String,
-        val detail: String,
-        val originalDexCrc32: Long,
-        val installedDexCrcs: Map<String, Long>,
-        val targetInstallPath: String,
-        val workingDexPath: String,
-        val pathsLengthMatch: Boolean,
-        val patchCount: Int,
-        val patchApplied: Boolean,
-        val patchDetail: String,
-        val patchPerDex: List<String>,
-        val vdexPatchCount: Int,
-        val vdexPatchApplied: Boolean,
-        val vdexPatchDetail: String,
-        val vdexPatchPerDex: List<String>,
-        val permissionsApplied: Boolean,
-        val permissionsDetail: String,
-        // Final "move" step — copy odex+vdex to the target app's install-dir oat/<isa>/ folder.
-        val moveAttempted: Boolean,
-        val moveApplied: Boolean,
-        val movedOdexPath: String,
-        val movedVdexPath: String,
-        val moveDetail: String,
-    )
 
     /**
      * Pipeline against a user-picked APK. Resolves the APK's package name and looks
@@ -158,14 +104,14 @@ object Dex2OatRunner {
         // Resolve the picked APK's package name → the currently-installed version's
         // sourceDir. This is the whole point of the pipeline: without a real installed
         // target we have nowhere to move the produced OAT to.
-        val pkgName = queryApkPackageName(context, stagedApk)
+        val pkgName = ApkTools.queryApkPackageName(context, stagedApk)
         if (pkgName == null) {
             Log.e(TAG, "FAIL: could not parse package name from picked APK")
             return errored(apkUri.toString(), "could not parse package name from picked APK — is it a valid APK?")
         }
         vlog(TAG, "  parsed package name: $pkgName")
 
-        val installedInfo = resolveInstalledApplicationInfo(context, pkgName)
+        val installedInfo = ApkTools.resolveInstalledApplicationInfo(context, pkgName)
         if (installedInfo == null) {
             Log.e(TAG, "FAIL: package '$pkgName' is not installed on this device")
             return errored(
@@ -182,11 +128,22 @@ object Dex2OatRunner {
         return runOnApkFile(
             context, stagedApk,
             label = "$pkgName (uid=${installedInfo.uid})",
+            targetPackage = pkgName,
             targetInstallPath = installedInfo.sourceDir,
             targetInstallDir = File(installedInfo.sourceDir).parentFile?.absolutePath,
             targetUid = installedInfo.uid,
             sharedLibraryFiles = installedInfo.sharedLibraryFiles,
         )
+    }
+
+    /** Force-stop the target so ART drops the old OAT, then relaunch it (root). */
+    fun relaunchTarget(pkg: String): Boolean {
+        if (pkg.isBlank()) return false
+        runAsRoot(listOf("am", "force-stop", pkg))
+        val (exit, _, _) = runAsRoot(
+            listOf("monkey", "-p", pkg, "-c", "android.intent.category.LAUNCHER", "1"),
+        )
+        return exit == 0
     }
 
     private fun logSection(title: String) {
@@ -200,106 +157,11 @@ object Dex2OatRunner {
         vlog(TAG, "──── STEP $n: $title ────")
     }
 
-    private fun queryApkPackageName(context: Context, apkFile: File): String? = try {
-        context.packageManager.getPackageArchiveInfo(apkFile.absolutePath, 0)?.packageName
-    } catch (t: Throwable) {
-        vlog(TAG, t.message.toString())
-        null
-    }
-
-    private data class InstalledInfo(val sourceDir: String, val uid: Int, val sharedLibraryFiles: List<String>)
-
-    /**
-     * Returns installed app's sourceDir, uid (== gid for third-party apps), and its
-     * resolved shared-library JAR paths (populated when the manifest declares
-     * <uses-library> entries and those libraries are installed on the system).
-     */
-    private fun resolveInstalledApplicationInfo(context: Context, packageName: String): InstalledInfo? = try {
-        val flags = android.content.pm.PackageManager.GET_SHARED_LIBRARY_FILES
-        val ai = context.packageManager.getApplicationInfo(packageName, flags)
-        InstalledInfo(
-            sourceDir = ai.sourceDir,
-            uid = ai.uid,
-            sharedLibraryFiles = ai.sharedLibraryFiles?.toList() ?: emptyList(),
-        )
-    } catch (t: Throwable) {
-        vlog(TAG, t.message.toString())
-        null
-    }
-
-    /**
-     * Class-loader-context resolution strategy:
-     *
-     *   1. Preferred — read the exact CLC string from the currently-installed OAT's
-     *      key_value_store. That's what installd used when it compiled the OAT, so
-     *      it's guaranteed correct for the target app.
-     *   2. Fallback — build a CLC from PackageManager's resolved sharedLibraryFiles,
-     *      matching the `PCL[]{PCL[/system/framework/lib.jar]#PCL[...]}` syntax.
-     *   3. Last resort — bare `PCL[]`.
-     */
-    private fun resolveClassLoaderContext(
-        installedSourceDir: String,
-        isa: String,
-        sharedLibraryFiles: List<String>,
-    ): Pair<String, String> {
-        // Attempt 1: read from the installed OAT.
-        val installedOatPath = "${File(installedSourceDir).parent}/oat/$isa/base.odex"
-        vlog(TAG, "  [CLC] tier 1: looking in installed OAT at $installedOatPath")
-        val fromInstalledOat = readClcFromOat(File(installedOatPath))
-        if (!fromInstalledOat.isNullOrBlank()) {
-            vlog(TAG, "  [CLC] tier 1 hit: $fromInstalledOat")
-            return fromInstalledOat to "read from installed OAT ($installedOatPath) key_value_store"
-        }
-        vlog(TAG, "  [CLC] tier 1 miss (installed OAT missing or CLC not found)")
-        // Attempt 2: construct from PackageManager's shared library list.
-        if (sharedLibraryFiles.isNotEmpty()) {
-            val libsStr = sharedLibraryFiles.joinToString("#") { "PCL[$it]" }
-            val clc = "PCL[]{$libsStr}"
-            vlog(TAG, "  [CLC] tier 2 hit: $clc")
-            return clc to "constructed from PackageManager.sharedLibraryFiles (${sharedLibraryFiles.size} libs)"
-        }
-        // Attempt 3: bare PCL[].
-        vlog(TAG, "  [CLC] tier 3 fallback: $FALLBACK_CLC (no shared libs)")
-        return FALLBACK_CLC to "no shared libraries declared, using fallback"
-    }
-
-    /**
-     * Extracts the `--class-loader-context` value from an OAT's key_value_store.
-     *
-     * dex2oat stores its full command line as one big string inside the OAT's
-     * key_value_store (part of OatHeader, see AOSP art/runtime/oat.h). Args inside
-     * that string are SPACE-separated, so a flag's value ends at the next space
-     * character. We search for `--class-loader-context=` (with `=`), then read
-     * until byte 0x20.
-     *
-     * key_value_store lives near the top of oatdata; scanning the first ~32 KB is
-     * more than enough on every real OAT.
-     */
-    private fun readClcFromOat(oatFile: File): String? {
-        if (!oatFile.exists() || oatFile.length() < 4096) return null
-        return try {
-            val readSize = minOf(32 * 1024L, oatFile.length()).toInt()
-            val bytes = ByteArray(readSize)
-            java.io.RandomAccessFile(oatFile, "r").use { raf -> raf.readFully(bytes) }
-            val keyBytes = "--class-loader-context=".toByteArray(Charsets.US_ASCII)
-            val idx = indexOfBytes(bytes, keyBytes)
-            if (idx < 0) return null
-            val valStart = idx + keyBytes.size
-            var end = valStart
-            // Value ends at next space (arg terminator) or null (safety).
-            while (end < bytes.size && bytes[end] != 0x20.toByte() && bytes[end] != 0.toByte()) end++
-            if (end == valStart) return null
-            String(bytes, valStart, end - valStart, Charsets.US_ASCII)
-        } catch (t: Throwable) {
-            vlog(TAG, t.message.toString())
-            null
-        }
-    }
-
     private fun runOnApkFile(
         context: Context,
         apkFile: File,
         label: String,
+        targetPackage: String,
         targetInstallPath: String,
         targetInstallDir: String?,
         targetUid: Int,
@@ -319,19 +181,19 @@ object Dex2OatRunner {
         // PDF pp. 8-9). For a multi-dex APK, each classesN.dex has its own
         // OatDexFileHeader entry with its own dex_file_location_checksum — every
         // one must be patched; missing any one causes ART to reject the OAT.
-        val originalCrc32 = computeDexCrc32(apkFile)
+        val originalCrc32 = ApkTools.computeDexCrc32(apkFile)
         if (originalCrc32 < 0) return errored(
             label,
             "picked APK has no classes.dex — is it a split APK (split_config.*.apk) or a bundle (.aab/.xapk)?" +
                 " Pick the BASE APK that contains classes.dex."
         )
-        val pickedApkCrcs = computeAllDexCrcs(apkFile)
+        val pickedApkCrcs = ApkTools.computeAllDexCrcs(apkFile)
         if (pickedApkCrcs.isEmpty()) return errored(
             label,
             "picked APK has no classes*.dex entries — it looks like a split APK or resource-only APK." +
                 " Pick the base APK (usually the largest one, or the one literally named base.apk)."
         )
-        val installedApkCrcs = computeAllDexCrcs(File(targetInstallPath))
+        val installedApkCrcs = ApkTools.computeAllDexCrcs(File(targetInstallPath))
         if (installedApkCrcs.isEmpty()) return errored(label, "could not read classes*.dex CRCs from installed APK at $targetInstallPath")
         vlog(TAG, "  picked APK classesN.dex CRCs (${pickedApkCrcs.size} entries):")
         pickedApkCrcs.forEach { (name, crc) -> vlog(TAG, "    $name = 0x%08x".format(crc)) }
@@ -351,7 +213,7 @@ object Dex2OatRunner {
         // OAT was compiled with, by reading the exact CLC string from the installed
         // OAT's key_value_store, with two fallbacks (PackageManager shared libraries,
         // then bare PCL[]).
-        val (clc, clcSource) = resolveClassLoaderContext(targetInstallPath, isa, sharedLibraryFiles)
+        val (clc, clcSource) = ClcResolver.resolveClassLoaderContext(targetInstallPath, isa, sharedLibraryFiles)
         vlog(TAG, "  resolved CLC: $clc")
         vlog(TAG, "  source: $clcSource")
 
@@ -395,6 +257,7 @@ object Dex2OatRunner {
         if (!hasRoot()) {
             return RunResult(
                 sourceApkPath = label,
+                targetPackage = targetPackage,
                 rootAvailable = false, command = emptyList(), exitCode = -1,
                 stdout = "", stderr = "",
                 outDexPath = workingApkPath, outOatPath = outOatPath,
@@ -451,7 +314,7 @@ object Dex2OatRunner {
         val stagingSource: File
         if (embedDexInVdex) {
             val compressedApk = File(apkFile.parentFile, "working-compressed.apk")
-            val recompressedOk = stageWorkingApkWithCompressedDex(apkFile, compressedApk)
+            val recompressedOk = ApkTools.stageWorkingApkWithCompressedDex(apkFile, compressedApk)
             stagingSource = if (recompressedOk) compressedApk else apkFile
             if (recompressedOk) {
                 vlog(TAG, "  re-staged working APK with DEFLATED dex: ${compressedApk.absolutePath} (${compressedApk.length()} bytes)")
@@ -509,6 +372,7 @@ object Dex2OatRunner {
         vlog(TAG, "  Detection: for each occurrence of the padded path in the OAT bytes,")
         vlog(TAG, "             read the uint32 size prefix 4 bytes before the match.")
         vlog(TAG, "             size == workingPath.length      → main classes.dex entry")
+
         vlog(TAG, "             size == workingPath.length + N  → check for !classesN.dex")
         vlog(TAG, "             other                            → false positive, skip")
 
@@ -524,7 +388,7 @@ object Dex2OatRunner {
             // dex2oat runs as root; make OAT writable by our uid so we can rewrite bytes.
             runAsRoot(listOf("chmod", "666", outOatPath))
             vlog(TAG, "  chmod 666 on OAT so we can write to it from our uid")
-            val res = patchOatMultiDex(oatFile, workingApkPath, targetInstallPath, pickedApkCrcs, installedApkCrcs)
+            val res = OatVdexPatcher.patchOatMultiDex(oatFile, workingApkPath, targetInstallPath, pickedApkCrcs, installedApkCrcs)
             patchCount = res.patchCount
             patchApplied = res.applied
             patchDetail = res.detail
@@ -559,7 +423,7 @@ object Dex2OatRunner {
         if (vdexFile.exists() && vdexFile.length() > 0) {
             runAsRoot(listOf("chmod", "666", outVdexPath))
             vlog(TAG, "  chmod 666 on VDEX so we can write to it")
-            val res = patchVdexChecksums(vdexFile, pickedApkCrcs, installedApkCrcs)
+            val res = OatVdexPatcher.patchVdexChecksums(vdexFile, pickedApkCrcs, installedApkCrcs)
             vdexPatchCount = res.patchCount
             vdexPatchApplied = res.applied
             vdexPatchDetail = res.detail
@@ -708,6 +572,7 @@ object Dex2OatRunner {
 
         return RunResult(
             sourceApkPath = label,
+            targetPackage = targetPackage,
             rootAvailable = true,
             command = command,
             exitCode = exit,
@@ -745,392 +610,6 @@ object Dex2OatRunner {
             movedVdexPath = movedVdexPath,
             moveDetail = moveDetail,
         )
-    }
-
-    // ────────────────────────────── OAT byte-patching ──────────────────────────────
-
-    private data class PatchResult(
-        val patchCount: Int,
-        val applied: Boolean,
-        val detail: String,
-        val perDexDetails: List<String>,
-    )
-
-    /**
-     * Multi-dex-aware OAT patch. Each classesN.dex in the source APK generates its own
-     * OatDexFileHeader inside the OAT, and each header's `dex_file_location_data` is
-     * something like `<workingPath>!classesN.dex` (main dex has bare `<workingPath>`).
-     *
-     * We iterate ALL occurrences of workingPath in the OAT bytes, detect the
-     * `!classesN.dex` suffix (if any) to identify the entry, overwrite the path with
-     * targetPath (same length, no shift), and overwrite the 4-byte checksum that
-     * follows the full location string with the corresponding classesN.dex CRC32
-     * pulled from the INSTALLED target APK — the value ART will compare against at
-     * load time.
-     */
-    private fun patchOatMultiDex(
-         oat: File,
-        workingPath: String,
-        targetPath: String,
-        pickedApkCrcs: Map<String, Long>,
-        installedApkCrcs: Map<String, Long>,
-    ): PatchResult {
-        if (workingPath.length != targetPath.length) {
-            return PatchResult(0, false, "path lengths differ (${workingPath.length} vs ${targetPath.length}) — refusing to patch", emptyList())
-        }
-        return try {
-            vlog(TAG, "  [OAT patch] reading ${oat.length()} bytes from ${oat.absolutePath}")
-            val bytes = oat.readBytes()
-            val needle = workingPath.toByteArray(Charsets.US_ASCII)
-            vlog(TAG, "  [OAT patch] searching for working path (${needle.size} bytes) in OAT")
-            val targetBytes = targetPath.toByteArray(Charsets.US_ASCII)
-            val details = mutableListOf<String>()
-            val skipped = mutableListOf<String>()
-            var searchFrom = 0
-
-            var matchNum = 0
-            while (true) {
-                val idx = indexOfBytes(bytes, needle, searchFrom)
-                if (idx < 0) break
-                matchNum++
-
-                vlog(TAG, "  ┌─ [OAT] match #$matchNum: found working-path bytes at offset 0x%x (%d)".format(idx, idx))
-
-                // Positive identification via the uint32 dex_file_location_size prefix
-                // that lives 4 bytes BEFORE the path (PDF p. 8). If this value equals
-                // workingPath.length, it's the main classes.dex entry; if it equals
-                // workingPath.length + "!classesN.dex".length, it's a secondary entry;
-                // anything else is a stray occurrence (e.g. in key_value_store which
-                // embeds the dex2oat command line).
-                if (idx < 4) {
-                    vlog(TAG, "  └─ skip: match too near start of file to have a size prefix")
-                    searchFrom = idx + 1
-                    continue
-                }
-                val sizeBefore = uint32LE(bytes, idx - 4).toInt()
-                vlog(TAG, "  │   the 4 bytes BEFORE the path (the size field) = $sizeBefore")
-                vlog(TAG, "  │   raw size bytes @ 0x%x: %s".format(idx - 4, hex(bytes, idx - 4, 4)))
-                vlog(TAG, "  │   working path length = ${workingPath.length}")
-                vlog(TAG, "  │   → is this a real dex_file_location entry? (size must == ${workingPath.length}, or ${workingPath.length}+!classesN.dex)")
-
-                val dexName: String
-                val fullLocationLen: Int
-
-                when {
-                    sizeBefore == workingPath.length -> {
-                        // Main dex — bare path, no bang suffix.
-                        dexName = "classes.dex"
-                        fullLocationLen = workingPath.length
-                        vlog(TAG, "  │   ✓ size == ${workingPath.length} → REAL entry, this is the MAIN classes.dex")
-                    }
-                    sizeBefore in (workingPath.length + 2)..(workingPath.length + 32) -> {
-                        val suffixLen = sizeBefore - workingPath.length
-                        if (idx + workingPath.length + suffixLen > bytes.size) {
-                            vlog(TAG, "  └─ skip: suffix would run past end of file")
-                            searchFrom = idx + 1; continue
-                        }
-                        val suffixStr = String(bytes, idx + workingPath.length, suffixLen, Charsets.US_ASCII)
-                        if (suffixStr.matches(Regex("^!classes\\d*\\.dex$"))) {
-                            dexName = suffixStr.substring(1)
-                            fullLocationLen = sizeBefore
-                            vlog(TAG, "  │   ✓ size == ${workingPath.length}+$suffixLen and suffix='$suffixStr' → REAL entry for $dexName")
-                        } else {
-                            vlog(TAG, "  └─ ✗ FALSE POSITIVE: size=$sizeBefore but suffix='$suffixStr' isn't !classesN.dex (skipped)")
-                            skipped.add("false-positive @ 0x%x (size=%d, suffix='%s')".format(idx, sizeBefore, suffixStr))
-                            searchFrom = idx + 1
-                            continue
-                        }
-                    }
-                    else -> {
-                        // Not a dex_file_location entry (e.g. the command line stored in key_value_store).
-                        vlog(TAG, "  └─ ✗ FALSE POSITIVE: size=$sizeBefore matches no classesN.dex — this is the path")
-                        vlog(TAG, "         appearing inside the key_value_store command line, NOT a real header. (skipped)")
-                        skipped.add("false-positive @ 0x%x (size prefix=%d does not match any classesN.dex)".format(idx, sizeBefore))
-                        searchFrom = idx + 1
-                        continue
-                    }
-                }
-
-                vlog(TAG, "  │")
-                vlog(TAG, "  │   PATCHING $dexName:")
-                vlog(TAG, "  │   path  BEFORE @ 0x%x: '%s'".format(idx, String(bytes, idx, fullLocationLen, Charsets.US_ASCII)))
-
-                // Overwrite the path prefix with the target path (same length, no shift).
-                System.arraycopy(targetBytes, 0, bytes, idx, targetBytes.size)
-                vlog(TAG, "  │   path  AFTER  @ 0x%x: '%s'".format(idx, String(bytes, idx, fullLocationLen, Charsets.US_ASCII)))
-
-                // ---- PATCH THE CHECKSUM (search-based, like the VDEX patch) ----
-                // The dex_file_location_checksum sits a few bytes after the location string,
-                // but the exact gap depends on the OAT format: older formats put the CRC
-                // right after the path; modern formats (Android 16+) insert the 8-byte DEX
-                // magic "dex\n035\0" first, then the CRC, then a 20-byte SHA-1. Rather than
-                // hardcode that gap, we SEARCH for this dex's picked CRC32 (the value dex2oat
-                // just wrote) in a small window right after the location string and overwrite
-                // the first occurrence with the installed CRC. The DEX magic can never equal
-                // a CRC, so the first match after the path is always the real checksum field.
-                val pickedCrc = pickedApkCrcs[dexName]
-                val installedCrc = installedApkCrcs[dexName]
-                val searchStart = idx + fullLocationLen
-                val searchEnd = minOf(searchStart + 64, bytes.size)
-                if (pickedCrc != null && installedCrc != null) {
-                    val pickedPattern = byteArrayOf(
-                        (pickedCrc and 0xFF).toByte(),
-                        ((pickedCrc shr 8) and 0xFF).toByte(),
-                        ((pickedCrc shr 16) and 0xFF).toByte(),
-                        ((pickedCrc shr 24) and 0xFF).toByte(),
-                    )
-                    val checksumOff = indexOfBytes(bytes, pickedPattern, searchStart)
-                    if (checksumOff in searchStart until searchEnd) {
-                        vlog(TAG, "  │   checksum found @ 0x%x (searched picked CRC 0x%08x, gap=%d bytes after path)".format(checksumOff, pickedCrc, checksumOff - searchStart))
-                        bytes[checksumOff] = (installedCrc and 0xFF).toByte()
-                        bytes[checksumOff + 1] = ((installedCrc shr 8) and 0xFF).toByte()
-                        bytes[checksumOff + 2] = ((installedCrc shr 16) and 0xFF).toByte()
-                        bytes[checksumOff + 3] = ((installedCrc shr 24) and 0xFF).toByte()
-                        vlog(TAG, "  │   checksum AFTER  @ 0x%x: %s (= 0x%08x  ← installed %s CRC)".format(checksumOff, hex(bytes, checksumOff, 4), installedCrc, dexName))
-                        vlog(TAG, "  └─ ✓ patched $dexName (path swapped, CRC written)")
-                        details.add("%s @ 0x%x, size=%d, checksum @ 0x%x, CRC 0x%08x".format(dexName, idx, fullLocationLen, checksumOff, installedCrc))
-                    } else {
-                        Log.w(TAG, "  └─ ⚠ picked CRC 0x%08x not found within 64 bytes after location for $dexName — checksum NOT patched".format(pickedCrc))
-                        details.add("%s @ 0x%x, size=%d — path patched, checksum NOT found (picked CRC 0x%08x)".format(dexName, idx, fullLocationLen, pickedCrc))
-                    }
-                } else {
-                    Log.w(TAG, "  └─ ⚠ missing picked/installed CRC for $dexName — checksum not patched")
-                    details.add("%s @ 0x%x, size=%d — missing CRC for $dexName".format(dexName, idx, fullLocationLen))
-                }
-                searchFrom = idx + fullLocationLen
-            }
-            vlog(TAG, "  [OAT patch] scanned all matches: ${details.size} real entries patched, ${skipped.size} false positives skipped")
-
-            if (details.isEmpty()) {
-                PatchResult(0, false, "no valid dex_file_location entries found; ${skipped.size} strays skipped", skipped)
-            } else {
-                oat.writeBytes(bytes)
-                val summary = "patched ${details.size} dex_file_location entries" +
-                    if (skipped.isNotEmpty()) "; ${skipped.size} false-positives skipped" else ""
-                PatchResult(details.size, true, summary, details + skipped)
-            }
-        } catch (t: Throwable) {
-            vlog(TAG, t.message.toString());
-            PatchResult(0, false, "patch error: ${t.message}", emptyList())
-        }
-    }
-
-    private fun uint32LE(bytes: ByteArray, offset: Int): Long =
-        (bytes[offset].toLong() and 0xFF) or
-            ((bytes[offset + 1].toLong() and 0xFF) shl 8) or
-            ((bytes[offset + 2].toLong() and 0xFF) shl 16) or
-            ((bytes[offset + 3].toLong() and 0xFF) shl 24)
-
-    /** Pretty-print [len] bytes from [bytes] at [off] as space-separated hex, for logs. */
-    private fun hex(bytes: ByteArray, off: Int, len: Int): String {
-        val end = minOf(off + len, bytes.size)
-        if (off < 0 || off >= bytes.size) return "<out of range>"
-        val sb = StringBuilder()
-        for (i in off until end) {
-            sb.append("%02x ".format(bytes[i].toInt() and 0xFF))
-        }
-        return sb.toString().trim()
-    }
-
-    /**
-     * VDEX header carries its own dex_checksums array — ART cross-checks it against
-     * the OAT's dex_file_location_checksum values, and if they disagree the whole
-     * OAT is rejected.
-     *
-     * VDEX layout has changed several times (v019 → v027+). The checksum array's
-     * offset differs by version:
-     *   v019-v020ish: offset 20 (as older offset-based tools hardcode)
-     *   v027+ (Android 15/16): offset 0x3c, stored in a header pointer at byte 0x10
-     *
-     * Instead of tracking every version's layout, we do a version-agnostic patch:
-     * dex2oat just wrote the picked APK's 6 CRC32s consecutively into the VDEX at
-     * whatever offset the format uses. We search for that exact 24-byte sequence
-     * and replace it with the installed APK's CRC32s. First match, before any DEX
-     * data starts — no chance of hitting a false positive in embedded DEX bytes.
-     */
-    private fun patchVdexChecksums(
-        vdex: File,
-        pickedApkCrcs: Map<String, Long>,
-        installedApkCrcs: Map<String, Long>,
-    ): PatchResult {
-        return try {
-            vlog(TAG, "  [VDEX patch] reading ${vdex.length()} bytes from ${vdex.absolutePath}")
-            val bytes = vdex.readBytes()
-            if (bytes.size < 24) return PatchResult(0, false, "VDEX too small (${bytes.size} bytes)", emptyList())
-            val version = try {
-                String(bytes, 4, 3, Charsets.US_ASCII).trim().toInt()
-            } catch (t: Throwable) {
-                vlog(TAG, t.message.toString())
-                -1
-            }
-            vlog(TAG, "  [VDEX patch] version = $version (from bytes 4-6)")
-
-            // Sort dex entries in natural order: classes.dex, classes2.dex, ..., classesN.dex.
-            val sortedNames = installedApkCrcs.keys.sortedBy { name ->
-                if (name == "classes.dex") 0
-                else name.removePrefix("classes").removeSuffix(".dex").toIntOrNull() ?: 999
-            }
-            if (sortedNames.isEmpty()) return PatchResult(0, false, "no CRCs to patch", emptyList())
-            vlog(TAG, "  [VDEX patch] sorted dex order: ${sortedNames.joinToString()}")
-
-            // Build the exact 4*N-byte pattern dex2oat wrote — the PICKED APK's CRCs in natural order.
-            val expected = ByteArray(sortedNames.size * 4)
-            sortedNames.forEachIndexed { i, name ->
-                val crc = pickedApkCrcs[name] ?: 0L
-                expected[i * 4]     = (crc and 0xFF).toByte()
-                expected[i * 4 + 1] = ((crc shr 8) and 0xFF).toByte()
-                expected[i * 4 + 2] = ((crc shr 16) and 0xFF).toByte()
-                expected[i * 4 + 3] = ((crc shr 24) and 0xFF).toByte()
-            }
-            vlog(TAG, "  [VDEX patch] search pattern: ${expected.size} bytes = ${sortedNames.size} × CRC32")
-            vlog(TAG, "                              (picked APK CRCs in natural dex order)")
-            vlog(TAG, "  [VDEX patch] pattern bytes: ${hex(expected, 0, expected.size)}")
-            sortedNames.forEachIndexed { i, name ->
-                vlog(TAG, "                slot $i = $name picked-CRC 0x%08x".format(pickedApkCrcs[name] ?: 0L))
-            }
-
-            // Search for it — first match wins (VDEX header comes before embedded DEX data).
-            val idx = indexOfBytes(bytes, expected)
-            if (idx < 0) {
-                Log.e(TAG, "  [VDEX patch] pattern NOT FOUND — pipeline will fail")
-                return PatchResult(
-                    0, false,
-                    "VDEX v$version: picked APK's CRC sequence not found consecutively — did dex2oat compile the picked APK?",
-                    emptyList(),
-                )
-            }
-            vlog(TAG, "  [VDEX patch] pattern found at offset 0x%x (%d) — this is where the checksums array lives".format(idx, idx))
-            vlog(TAG, "  [VDEX patch] BEFORE (whole array): ${hex(bytes, idx, sortedNames.size * 4)}")
-
-            // Overwrite each 4-byte slot with the installed APK's CRC for the corresponding dex.
-            val details = mutableListOf<String>()
-            sortedNames.forEachIndexed { i, name ->
-                val crc = installedApkCrcs[name] ?: return@forEachIndexed
-                val off = idx + i * 4
-                vlog(TAG, "  ┌─ [VDEX] slot $i ($name) @ 0x%x".format(off))
-                vlog(TAG, "  │   BEFORE: %s (= 0x%08x  ← picked-APK CRC dex2oat wrote)".format(hex(bytes, off, 4), uint32LE(bytes, off)))
-                bytes[off]     = (crc and 0xFF).toByte()
-                bytes[off + 1] = ((crc shr 8) and 0xFF).toByte()
-                bytes[off + 2] = ((crc shr 16) and 0xFF).toByte()
-                bytes[off + 3] = ((crc shr 24) and 0xFF).toByte()
-                vlog(TAG, "  └─ AFTER : %s (= 0x%08x  ← installed-APK CRC, what ART expects)".format(hex(bytes, off, 4), crc))
-                details.add("$name @ 0x%x, CRC 0x%08x".format(off, crc))
-            }
-            vlog(TAG, "  [VDEX patch] AFTER  (whole array): ${hex(bytes, idx, sortedNames.size * 4)}")
-
-            vdex.writeBytes(bytes)
-            PatchResult(
-                details.size, true,
-                "patched VDEX v$version — ${details.size} CRCs at offset 0x%x (detected)".format(idx),
-                details,
-            )
-        } catch (t: Throwable) {
-            vlog(TAG, t.message.toString());
-            PatchResult(0, false, "VDEX patch error: ${t.message}", emptyList())
-        }
-    }
-
-    private fun indexOfBytes(haystack: ByteArray, needle: ByteArray, from: Int = 0): Int {
-        if (needle.isEmpty() || haystack.size < needle.size) return -1
-        val start = maxOf(0, from)
-        outer@ for (i in start..haystack.size - needle.size) {
-            for (j in needle.indices) {
-                if (haystack[i + j] != needle[j]) continue@outer
-            }
-            return i
-        }
-        return -1
-    }
-
-    // ────────────────────────────── APK / DEX helpers ──────────────────────────────
-
-    /**
-     * Copies [src] APK to [dest], forcing every classesN.dex entry to be stored DEFLATED.
-     * Everything else is copied through with its original compression method preserved.
-     *
-     * Why: dex2oat embeds the DEX into the VDEX only when it cannot memory-map the entry
-     * straight from the APK — which is exactly when the entry is compressed. An input whose
-     * DEX is Stored (uncompressed) yields a VDEX with an empty DexFile section, so the
-     * modified bytecode is not self-contained. Compressing the DEX here guarantees a
-     * self-contained VDEX regardless of how the input APK stored its DEX. The DEX CRC-32
-     * (computed over the uncompressed data) does not change, so checksum patching still
-     * works. This working copy is only fed to dex2oat, never installed or launched, so
-     * recompressing other entries would be harmless too — we preserve them only to save work.
-     */
-    private fun stageWorkingApkWithCompressedDex(src: File, dest: File): Boolean = try {
-        val dexNameRegex = Regex("^classes\\d*\\.dex$")
-        ZipFile(src).use { zin ->
-            ZipOutputStream(dest.outputStream().buffered()).use { zout ->
-                zout.setLevel(Deflater.BEST_SPEED)
-                val entries = zin.entries()
-                while (entries.hasMoreElements()) {
-                    val e = entries.nextElement()
-                    val out = ZipEntry(e.name)
-                    if (e.isDirectory) {
-                        zout.putNextEntry(out)
-                        zout.closeEntry()
-                        continue
-                    }
-                    if (dexNameRegex.matches(e.name)) {
-                        out.method = ZipEntry.DEFLATED
-                    } else {
-                        // Preserve original storage; STORED entries must carry size + crc.
-                        out.method = e.method
-                        if (e.method == ZipEntry.STORED) {
-                            out.size = e.size
-                            out.compressedSize = e.size
-                            out.crc = e.crc
-                        }
-                    }
-                    zout.putNextEntry(out)
-                    zin.getInputStream(e).use { it.copyTo(zout) }
-                    zout.closeEntry()
-                }
-            }
-        }
-        dest.exists() && dest.length() > 0
-    } catch (t: Throwable) {
-        vlog(TAG, "  recompress staging failed: ${t.message}")
-        try { dest.delete() } catch (_: Throwable) {}
-        false
-    }
-
-    private fun computeDexCrc32(apkFile: File): Long = try {
-        ZipFile(apkFile).use { zip ->
-            val entry = zip.getEntry("classes.dex") ?: return -1L
-            val crc = CRC32()
-            zip.getInputStream(entry).use { input ->
-                val buf = ByteArray(64 * 1024)
-                while (true) {
-                    val n = input.read(buf)
-                    if (n <= 0) break
-                    crc.update(buf, 0, n)
-                }
-            }
-            crc.value
-        }
-    } catch (t: Throwable) {
-        vlog(TAG, t.message.toString());
-        -1L
-    }
-
-    /** Reads CRC32 for every `classesN.dex` entry directly from the APK's central directory. */
-    private fun computeAllDexCrcs(apkFile: File): Map<String, Long> {
-        val out = mutableMapOf<String, Long>()
-        return try {
-            ZipFile(apkFile).use { zip ->
-                zip.entries().toList().forEach { entry ->
-                    if (entry.name.matches(Regex("^classes\\d*\\.dex$"))) {
-                        // ZipEntry.crc is stored in the central directory — no re-hash needed.
-                        out[entry.name] = entry.crc
-                    }
-                }
-            }
-            out
-        } catch (t: Throwable) {
-            vlog(TAG, t.message.toString());
-            out
-        }
     }
 
 // ────────────────────────────── system / arch ──────────────────────────────
@@ -1199,7 +678,7 @@ object Dex2OatRunner {
             p.waitFor()
             out.contains("uid=0")
         } catch (t: Throwable) {
-            vlog(TAG, t.message.toString());
+            vlog(TAG, t.message.toString())
             false
         }
     }
@@ -1223,17 +702,18 @@ object Dex2OatRunner {
     private fun readAll(stream: java.io.InputStream): String = try {
         BufferedReader(InputStreamReader(stream)).use { it.readText() }
     } catch (t: Throwable) {
-        vlog(TAG, t.message.toString());
+        vlog(TAG, t.message.toString())
         ""
     }
 
     private fun errored(source: String, detail: String) = RunResult(
         sourceApkPath = source,
+        targetPackage = "",
         rootAvailable = false, command = emptyList(), exitCode = -1,
         stdout = "", stderr = "",
         outDexPath = "", outOatPath = "",
         outOatExists = false, outOatSizeBytes = 0, instructionSet = currentInstructionSet(),
-        classLoaderContext = FALLBACK_CLC,
+        classLoaderContext = ClcResolver.FALLBACK_CLC,
         classLoaderContextSource = "not resolved (pipeline errored early)",
         detail = detail,
         originalDexCrc32 = -1L, targetInstallPath = "", workingDexPath = "",

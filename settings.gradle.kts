@@ -22,5 +22,5 @@ dependencyResolutionManagement {
     }
 }
 
-rootProject.name = "dex2oat"
+rootProject.name = "ARTisan"
 include(":app")
