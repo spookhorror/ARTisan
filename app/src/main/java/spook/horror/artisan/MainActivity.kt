@@ -33,6 +33,10 @@ import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.IconButton
+import androidx.compose.foundation.ExperimentalFoundationApi
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.relocation.BringIntoViewRequester
+import androidx.compose.foundation.relocation.bringIntoViewRequester
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Scaffold
@@ -297,11 +301,46 @@ private fun HeroActionCard(running: Boolean, hasResult: Boolean, onPick: () -> U
     }
 }
 
+@OptIn(ExperimentalFoundationApi::class)
 @Composable
 private fun ResultSection(r: RunResult, onLaunch: () -> Unit) {
-    var showDetails by remember { mutableStateOf(false) }
+    val steps = listOf(
+        Triple(1, "Source + installed CRC32s captured", r.originalDexCrc32 >= 0 && r.installedDexCrcs.isNotEmpty()),
+        Triple(2, "Sabanal path padding", r.pathsLengthMatch),
+        Triple(3, "dex2oat invocation", r.exitCode == 0 && r.outOatExists),
+        Triple(4, "OAT produced", r.outOatExists),
+        Triple(5, "ODEX byte-patch", r.patchApplied && r.patchCount == r.installedDexCrcs.size),
+        Triple(6, "VDEX byte-patch", r.vdexPatchApplied && r.vdexPatchCount == r.installedDexCrcs.size),
+        Triple(7, "Permission fixups", r.permissionsApplied),
+        Triple(8, "Move to install dir", if (r.moveAttempted) r.moveApplied else true),
+    )
+    val failed = steps.firstOrNull { !it.third }
+    val reqs = remember { List(8) { BringIntoViewRequester() } }
+    val scope = rememberCoroutineScope()
+    var showDetails by remember(r) { mutableStateOf(failed != null) }
+
     Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
         OverallStatusCard(r, onLaunch)
+
+        failed?.let { (num, title, _) ->
+            Card(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clickable {
+                        showDetails = true
+                        scope.launch { reqs[num - 1].bringIntoView() }
+                    },
+                colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.errorContainer),
+            ) {
+                Text(
+                    "✗ Step $num failed: $title — tap to view",
+                    modifier = Modifier.padding(14.dp),
+                    style = MaterialTheme.typography.bodyMedium,
+                    fontWeight = FontWeight.SemiBold,
+                    color = MaterialTheme.colorScheme.onErrorContainer,
+                )
+            }
+        }
 
         OutlinedButton(
             onClick = { showDetails = !showDetails },
@@ -313,6 +352,7 @@ private fun ResultSection(r: RunResult, onLaunch: () -> Unit) {
 
         StepCard(
             stepNumber = 1,
+            bringReq = reqs[0],
             title = "Source + installed CRC32s captured",
             subtitle = "Every classesN.dex in the INSTALLED target has its own OatDexFileHeader entry — we patch each one",
             statusOk = r.originalDexCrc32 >= 0 && r.installedDexCrcs.isNotEmpty(),
@@ -332,6 +372,7 @@ private fun ResultSection(r: RunResult, onLaunch: () -> Unit) {
 
         StepCard(
             stepNumber = 2,
+            bringReq = reqs[1],
             title = "Sabanal path padding",
             subtitle = "Working path padded with '1's so length matches target — byte-patch needs no offset relocation",
             statusOk = r.pathsLengthMatch,
@@ -343,6 +384,7 @@ private fun ResultSection(r: RunResult, onLaunch: () -> Unit) {
 
         StepCard(
             stepNumber = 3,
+            bringReq = reqs[2],
             title = "dex2oat invocation",
             subtitle = "Same command shape installd uses (only ISA differs by device)",
             statusOk = r.exitCode == 0 && r.outOatExists,
@@ -366,6 +408,7 @@ private fun ResultSection(r: RunResult, onLaunch: () -> Unit) {
 
         StepCard(
             stepNumber = 4,
+            bringReq = reqs[3],
             title = "OAT produced",
             subtitle = "dex2oat wrote the compiled OAT into this app's private files dir",
             statusOk = r.outOatExists,
@@ -377,6 +420,7 @@ private fun ResultSection(r: RunResult, onLaunch: () -> Unit) {
 
         StepCard(
             stepNumber = 5,
+            bringReq = reqs[4],
             title = "ODEX byte-patch (multi-dex)",
             subtitle = "For EACH classesN.dex: dex_file_location_data → target install path, dex_file_location_checksum → installed target's classesN.dex CRC32 (validated against the installed APK)",
             statusOk = r.patchApplied && r.patchCount == r.installedDexCrcs.size,
@@ -399,6 +443,7 @@ private fun ResultSection(r: RunResult, onLaunch: () -> Unit) {
 
         StepCard(
             stepNumber = 6,
+            bringReq = reqs[5],
             title = "VDEX byte-patch (dex_checksums array)",
             subtitle = "VDEX header carries its OWN CRC array, validated against the installed APK's DEX CRC — the same ground truth the ODEX is checked against. ART checks each independently, so you must patch both. Offset found by searching for the picked CRCs (version-agnostic; v027 stores them at 0x3c), 4 bytes per dex, natural order.",
             statusOk = r.vdexPatchApplied && r.vdexPatchCount == r.installedDexCrcs.size,
@@ -421,6 +466,7 @@ private fun ResultSection(r: RunResult, onLaunch: () -> Unit) {
 
         StepCard(
             stepNumber = 7,
+            bringReq = reqs[6],
             title = "Permission fixups",
             subtitle = "chmod 644 + chown 1000:<targetUid> — matches installd output (uid 1000 = system, group = target app's own uid)",
             statusOk = r.permissionsApplied,
@@ -431,6 +477,7 @@ private fun ResultSection(r: RunResult, onLaunch: () -> Unit) {
 
         StepCard(
             stepNumber = 8,
+            bringReq = reqs[7],
             title = "Move to install-dir oat/<isa>/",
             subtitle = "Copies odex+vdex into the target APK's real install dir (the final step). " +
                 "Skipped when the target isn't installed, or when any earlier step failed.",
@@ -521,7 +568,7 @@ private fun RunningCard() {
                     fontWeight = FontWeight.SemiBold,
                 )
                 Text(
-                    "Typically takes 5–15 seconds for a mid-size APK. All 8 cores hot.",
+                    "Typically 5–15 s for a mid-size APK. All ${Runtime.getRuntime().availableProcessors()} cores hot.",
                     style = MaterialTheme.typography.bodySmall,
                 )
             }
@@ -530,15 +577,19 @@ private fun RunningCard() {
 }
 
 @Composable
+@OptIn(ExperimentalFoundationApi::class)
 private fun StepCard(
     stepNumber: Int,
     title: String,
     subtitle: String,
     statusOk: Boolean,
+    bringReq: BringIntoViewRequester? = null,
     content: @Composable () -> Unit,
 ) {
     Card(
-        modifier = Modifier.fillMaxWidth(),
+        modifier = Modifier
+            .fillMaxWidth()
+            .then(if (bringReq != null) Modifier.bringIntoViewRequester(bringReq) else Modifier),
         colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceContainer),
     ) {
         Column(Modifier.padding(16.dp)) {
