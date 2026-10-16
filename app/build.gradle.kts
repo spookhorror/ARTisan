@@ -13,8 +13,8 @@ android {
         applicationId = "spook.horror.artisan"
         minSdk = 28
         targetSdk = 37
-        versionCode = 1
-        versionName = "0.1.0-alpha"
+        versionCode = 2
+        versionName = "0.2.0-beta"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
