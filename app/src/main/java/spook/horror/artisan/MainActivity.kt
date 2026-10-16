@@ -34,6 +34,7 @@ import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -247,20 +248,22 @@ private fun HeroActionCard(running: Boolean, hasResult: Boolean, onPick: () -> U
         colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.primaryContainer),
     ) {
         Column(Modifier.padding(20.dp)) {
-            Text(
-                "Compile & patch ODEX / VDEX",
-                style = MaterialTheme.typography.titleLarge,
-                fontWeight = FontWeight.Bold,
-                color = MaterialTheme.colorScheme.onPrimaryContainer,
-            )
-            Spacer(Modifier.height(6.dp))
-            Text(
-                "Pick an APK whose package is installed on this device. We compile a fresh OAT, " +
-                    "patch its ODEX + VDEX checksums, and drop them into the app's own oat/<isa>/ folder.",
-                style = MaterialTheme.typography.bodyMedium,
-                color = MaterialTheme.colorScheme.onPrimaryContainer,
-            )
-            Spacer(Modifier.height(16.dp))
+            if (!hasResult) {
+                Text(
+                    "Compile & patch ODEX / VDEX",
+                    style = MaterialTheme.typography.titleLarge,
+                    fontWeight = FontWeight.Bold,
+                    color = MaterialTheme.colorScheme.onPrimaryContainer,
+                )
+                Spacer(Modifier.height(6.dp))
+                Text(
+                    "Pick an APK whose package is installed on this device. We compile a fresh OAT, " +
+                        "patch its ODEX + VDEX checksums, and drop them into the app's own oat/<isa>/ folder.",
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onPrimaryContainer,
+                )
+                Spacer(Modifier.height(16.dp))
+            }
             Button(
                 onClick = onPick,
                 enabled = !running,
@@ -282,12 +285,14 @@ private fun HeroActionCard(running: Boolean, hasResult: Boolean, onPick: () -> U
                     fontWeight = FontWeight.SemiBold,
                 )
             }
-            Spacer(Modifier.height(8.dp))
-            Text(
-                "Requires root. Pick the base APK (must contain classes.dex).",
-                style = MaterialTheme.typography.labelMedium,
-                color = MaterialTheme.colorScheme.onPrimaryContainer,
-            )
+            if (!hasResult) {
+                Spacer(Modifier.height(8.dp))
+                Text(
+                    "Requires root. Pick the base APK (must contain classes.dex).",
+                    style = MaterialTheme.typography.labelMedium,
+                    color = MaterialTheme.colorScheme.onPrimaryContainer,
+                )
+            }
         }
     }
 }
@@ -298,7 +303,10 @@ private fun ResultSection(r: RunResult, onLaunch: () -> Unit) {
     Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
         OverallStatusCard(r, onLaunch)
 
-        TextButton(onClick = { showDetails = !showDetails }) {
+        OutlinedButton(
+            onClick = { showDetails = !showDetails },
+            modifier = Modifier.fillMaxWidth(),
+        ) {
             Text(if (showDetails) "Hide details" else "Show details")
         }
         if (showDetails) {
@@ -464,18 +472,20 @@ private fun OverallStatusCard(r: RunResult, onLaunch: () -> Unit) {
     ) {
         Column(Modifier.padding(16.dp)) {
             Text(
-                if (allOk) "Pipeline succeeded" else "Pipeline finished with issues",
-                style = MaterialTheme.typography.titleSmall,
+                if (allOk) "✓  Pipeline succeeded" else "✗  Pipeline finished with issues",
+                style = MaterialTheme.typography.titleMedium,
                 fontWeight = FontWeight.Bold,
                 color = fg,
             )
             Spacer(Modifier.height(4.dp))
             Text(
                 if (allOk)
-                    "%,d-byte OAT produced at %s, header patched, permissions applied. This matches installd's output shape."
-                        .format(r.outOatSizeBytes, r.outOatPath)
+                    "%,d-byte OAT · %s".format(
+                        r.outOatSizeBytes,
+                        if (r.moveApplied) "deployed to target" else "patched (not deployed)",
+                    )
                 else
-                    "See the step cards below for which stage failed and why.",
+                    "See step cards below for the failed stage.",
                 style = MaterialTheme.typography.bodySmall,
                 color = fg,
             )
